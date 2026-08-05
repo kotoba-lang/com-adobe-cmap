@@ -33,6 +33,28 @@ against a fixture written here.
 whatever the font says they mean, so there is no table to publish, and a font
 using it without `/ToUnicode` is not decodable by anyone.
 
+## Predefined encodings, for when the code is not a CID
+
+`Identity-H` — where the code IS the CID — is only the most common
+`/Encoding`. `90ms-RKSJ-H` is Shift-JIS: codes are one byte **or** two, the
+widths are declared in the file, and a reader that assumed two splits every
+ASCII character in half.
+
+```clojure
+(get (cmap/code->unicode "90ms-RKSJ-H") 0x82A0)   ;; => "あ"
+```
+
+Two published tables composed — code → CID → Unicode — neither guessed at.
+`split-codes` does the variable-width splitting from the file's own
+`codespacerange`, so it needs to know nothing about Shift-JIS, and `usecmap`
+is followed (`90ms-RKSJ-V` is the horizontal one plus vertical substitutions;
+read alone it maps almost nothing).
+
+Measured: 2 documents of 160, both Japanese legal PDFs whose **entire text**
+was unreadable without this. Only the encodings the corpus showed are
+vendored — adding another is dropping a file into
+`resources/adobe/cmap/encoding/`.
+
 ## Two ways a CMap range is misread, both tested
 
 A `bfrange` destination **increments** — reading it as one string repeated
@@ -58,4 +80,4 @@ clojure -M:test
 clojure -M:lint
 ```
 
-8 tests / 26 assertions.
+13 tests / 44 assertions.

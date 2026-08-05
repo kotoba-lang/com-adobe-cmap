@@ -73,3 +73,60 @@
         elapsed-ms (/ (- (System/nanoTime) t0) 1e6)]
     (is (< elapsed-ms 50)
         (str "50 lookups took " elapsed-ms "ms, which is a re-parse"))))
+
+;; ── predefined encodings ─────────────────────────────────────────────────────
+
+(deftest a-codespace-declares-its-own-byte-widths
+  ;; `<00> <80>` is one byte and `<8140> <9FFC>` is two, in the same file.
+  ;; This is what makes variable-width splitting possible without knowing
+  ;; anything about Shift-JIS.
+  (let [cs (cmap/parse-codespace
+            "begincodespacerange\n<00> <80>\n<8140> <9FFC>\nendcodespacerange")]
+    (is (= [[0x00 0x80 1] [0x8140 0x9FFC 2]] cs))))
+
+(deftest splitting-is-shortest-width-first
+  ;; A reader that assumed two bytes splits every ASCII character in a
+  ;; Shift-JIS string in half, and produces twice as many wrong characters
+  ;; as there were right ones.
+  (let [cs [[0x00 0x80 1] [0x8140 0x9FFC 2]]]
+    (is (= [0x41 0x42] (cmap/split-codes cs [0x41 0x42])) "two ASCII bytes")
+    (is (= [0x8140] (cmap/split-codes cs [0x81 0x40])) "one double-byte code")
+    (is (= [0x41 0x8140 0x42] (cmap/split-codes cs [0x41 0x81 0x40 0x42]))
+        "mixed, which is the whole point"))
+
+  (testing "a byte in no range is skipped rather than guessed at"
+    ;; Inventing a code for it puts a plausible wrong character in the
+    ;; middle of a real sentence.
+    (is (= [0x41] (cmap/split-codes [[0x00 0x80 1]] [0x41 0xFF])))))
+
+(deftest a-cid-range-increments-with-the-code
+  (is (= {0x20 231 0x21 232 0x22 233}
+         (cmap/parse-cids "begincidrange\n<20> <22>  231\nendcidrange")))
+  (is (= {0x7e 631} (cmap/parse-cids "begincidchar\n<7e> 631\nendcidchar"))))
+
+(deftest the-vendored-encoding-loads-and-follows-usecmap
+  ;; 90ms-RKSJ-V is 90ms-RKSJ-H plus a handful of vertical substitutions.
+  ;; Reading it alone gives a font with almost no mapping at all.
+  (let [h (cmap/encoding "90ms-RKSJ-H")
+        v (cmap/encoding "90ms-RKSJ-V")]
+    (is (= "Adobe-Japan1" (:ordering h)))
+    (is (> (count (:cid h)) 5000))
+    (is (> (count (:cid v)) 5000) "the vertical one inherited the horizontal")
+    (is (seq (:codespace v)))))
+
+(deftest shift-jis-decodes-to-the-characters-it-means
+  ;; The two published tables composed — code → CID → Unicode — and neither
+  ;; of them guessed at. 0x82A0 is あ in Shift-JIS; 0x41 is A.
+  (let [m (cmap/code->unicode "90ms-RKSJ-H")]
+    (is (= "A" (get m 0x41)))
+    (is (= "あ" (get m 0x82A0)))
+    ;; 0x889F is 亜, the first kanji of the JIS level-1 set, and 0x88A9 is
+    ;; 茜 — ten along. Both asserted, because getting the base right and the
+    ;; increment wrong is the failure that still produces real Japanese.
+    (is (= "亜" (get m 0x889F)))
+    (is (= "茜" (get m 0x88A9)))
+    (is (= "、" (get m 0x8141))))
+
+  (testing "an encoding nobody vendored is nil, not empty"
+    (is (nil? (cmap/code->unicode "EUC-H")))
+    (is (nil? (cmap/encoding "Identity-H")))))

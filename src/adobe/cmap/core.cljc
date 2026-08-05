@@ -29,8 +29,7 @@
   `cid->unicode` reads a resource, which is a host effect and JVM-only —
   `.cljc` here is for the parser, which is pure and portable. A caller on
   another platform reads the bytes itself and calls `parse`."
-  (:require [clojure.string :as str]
-            #?(:clj [clojure.java.io :as io])))
+  (:require #?(:clj [clojure.java.io :as io])))
 
 (def orderings
   "The collections with a published table, and the file each lives in.
@@ -139,3 +138,140 @@
              (let [m (parse (slurp url))]
                (swap! cache assoc ordering m)
                m))))))
+
+;; ── predefined encodings ─────────────────────────────────────────────────────
+;;
+;; A composite font's `/Encoding` names a CMap, and `Identity-H` — where the
+;; code IS the CID — is only the most common one. `90ms-RKSJ-H` is Shift-JIS:
+;; the codes are one byte OR two, the widths are declared in the file, and a
+;; reader that assumed two would split every ASCII character in half.
+;;
+;; Measured: 2 documents of 160, both Japanese legal PDFs whose ENTIRE text
+;; was unreadable without this. Only the encodings the corpus showed are
+;; vendored — adding another is dropping a file into
+;; `resources/adobe/cmap/encoding/`.
+
+(def encodings
+  "Predefined CMaps present here, and the collection each maps into."
+  {"90ms-RKSJ-H" "Adobe-Japan1"
+   "90ms-RKSJ-V" "Adobe-Japan1"})
+
+(defn parse-codespace
+  "`begincodespacerange` as `[[lo hi n-bytes] …]`.
+
+  The byte width is the length of the hex, not a property of the encoding:
+  `<00> <80>` is one byte and `<8140> <9FFC>` is two, in the same file. This
+  is the data that makes variable-width splitting possible without knowing
+  anything about Shift-JIS."
+  [text]
+  (into []
+        (mapcat (fn [block]
+                  (map (fn [[_ lo hi]]
+                         [(hex->long lo) (hex->long hi) (quot (count lo) 2)])
+                       (re-seq #"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>" block))))
+        (map second (re-seq #"(?s)begincodespacerange(.*?)endcodespacerange" text))))
+
+(defn parse-cids
+  "`begincidrange` / `begincidchar` as `{code cid}`.
+
+  A range's CID increments with the code, which is the same shape as a
+  `bfrange` and the same way to get it wrong."
+  [text]
+  (let [chars (reduce
+               (fn [acc block]
+                 (reduce (fn [acc [_ code cid]]
+                           (assoc acc (hex->long code)
+                                  #?(:clj (Long/parseLong cid) :cljs (js/parseInt cid 10))))
+                         acc
+                         (re-seq #"<([0-9A-Fa-f]+)>\s+(\d+)" block)))
+               {}
+               (map second (re-seq #"(?s)begincidchar(.*?)endcidchar" text)))]
+    (reduce
+     (fn [acc block]
+       (reduce (fn [acc [_ lo hi cid]]
+                 (let [lo (hex->long lo) hi (hex->long hi)
+                       cid #?(:clj (Long/parseLong cid) :cljs (js/parseInt cid 10))]
+                   ;; A codespace range can be enormous; a CID range is
+                   ;; bounded by the collection and never is. Guarding
+                   ;; anyway, because a corrupt length here would expand
+                   ;; into an out-of-memory error rather than a bad glyph.
+                   (if (> (- hi lo) 0xFFFF)
+                     acc
+                     (reduce (fn [a i] (assoc a (+ lo i) (+ cid i)))
+                             acc (range 0 (inc (- hi lo)))))))
+               acc
+               (re-seq #"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s+(\d+)" block)))
+     chars
+     (map second (re-seq #"(?s)begincidrange(.*?)endcidrange" text)))))
+
+(defn split-codes
+  "Bytes into codes, using a codespace.
+
+  Greedy by width, shortest first: a byte that begins a one-byte range IS a
+  one-byte code, and only a byte that does not begins a longer one. A reader
+  that assumed a fixed width splits every ASCII character in a Shift-JIS
+  string in half and produces twice as many wrong characters as there were
+  right ones.
+
+  A byte matching no range is skipped rather than guessed at — it is a
+  malformed string, and inventing a code for it puts a plausible wrong
+  character in the middle of a real sentence."
+  [codespace bytes]
+  (let [bytes (vec bytes)
+        n (count bytes)
+        widths (sort (distinct (map #(nth % 2) codespace)))]
+    (loop [i 0 out []]
+      (if (>= i n)
+        out
+        (let [hit (some (fn [w]
+                          (when (<= (+ i w) n)
+                            (let [code (reduce (fn [acc k]
+                                                 (+ (* acc 256) (nth bytes (+ i k))))
+                                               0 (range w))]
+                              (when (some (fn [[lo hi bw]]
+                                            (and (= bw w) (<= lo code hi)))
+                                          codespace)
+                                [code w]))))
+                        widths)]
+          (if hit
+            (recur (+ i (second hit)) (conj out (first hit)))
+            (recur (inc i) out)))))))
+
+#?(:clj
+   (def ^:private encoding-cache (atom {})))
+
+#?(:clj
+   (defn encoding
+     "A predefined CMap by name: `{:codespace … :cid … :ordering …}`, or nil.
+
+     `usecmap` is followed one level — `90ms-RKSJ-V` is `90ms-RKSJ-H` plus a
+     handful of vertical substitutions, and reading it alone gives a font
+     with almost no mapping at all."
+     [name]
+     (when-let [ordering (get encodings (str name))]
+       (or (get @encoding-cache name)
+           (when-let [url (io/resource (str "adobe/cmap/encoding/" name))]
+             (let [text (slurp url)
+                   parent (second (re-find #"/(\S+)\s+usecmap" text))
+                   base (when (and parent (not= parent (str name)))
+                          (encoding parent))
+                   m {:ordering ordering
+                      :codespace (into (vec (:codespace base)) (parse-codespace text))
+                      :cid (merge (:cid base) (parse-cids text))}]
+               (swap! encoding-cache assoc name m)
+               m))))))
+
+#?(:clj
+   (defn code->unicode
+     "`{code \"string\"}` for a predefined encoding: code → CID → Unicode.
+
+     Two published tables composed, neither of them guessed at. nil when the
+     encoding is not one that is vendored, which is the same answer a caller
+     gets for a font it cannot read any other way."
+     [name]
+     (when-let [{:keys [cid ordering]} (encoding name)]
+       (when-let [ucs (cid->unicode ordering)]
+         (persistent!
+          (reduce (fn [acc [code c]]
+                    (if-let [s (get ucs c)] (assoc! acc code s) acc))
+                  (transient {}) cid))))))
