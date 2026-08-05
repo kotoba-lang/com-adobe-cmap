@@ -28,8 +28,7 @@
 
   `cid->unicode` reads a resource, which is a host effect and JVM-only —
   `.cljc` here is for the parser, which is pure and portable. A caller on
-  another platform reads the bytes itself and calls `parse`."
-  (:require #?(:clj [clojure.java.io :as io])))
+  another platform reads the bytes itself and calls `parse`.")
 
 (def orderings
   "The collections with a published table, and the file each lives in.
@@ -117,6 +116,21 @@
   (contains? orderings (str ordering)))
 
 #?(:clj
+   (defn- resource-text
+     "A classpath resource as text, or nil.
+
+     Through the context classloader rather than `clojure.java.io/resource`
+     so this namespace needs no `:require` at all — a require whose only
+     entry is inside a `#?(:clj …)` leaves `(:require)` with nothing in it
+     on every other platform, which is a compile error and not an empty
+     require. That shipped for a few minutes because the lint output was
+     read after the merge rather than before it."
+     [path]
+     (when-let [s (.getResourceAsStream (.getContextClassLoader (Thread/currentThread))
+                                        ^String path)]
+       (slurp s))))
+
+#?(:clj
    (def ^:private cache (atom {})))
 
 #?(:clj
@@ -134,8 +148,8 @@
      [ordering]
      (when-let [file (get orderings (str ordering))]
        (or (get @cache ordering)
-           (when-let [url (io/resource (str "adobe/cmap/" file))]
-             (let [m (parse (slurp url))]
+           (when-let [text (resource-text (str "adobe/cmap/" file))]
+             (let [m (parse text)]
                (swap! cache assoc ordering m)
                m))))))
 
@@ -250,8 +264,8 @@
      [name]
      (when-let [ordering (get encodings (str name))]
        (or (get @encoding-cache name)
-           (when-let [url (io/resource (str "adobe/cmap/encoding/" name))]
-             (let [text (slurp url)
+           (when-let [text (resource-text (str "adobe/cmap/encoding/" name))]
+             (let [
                    parent (second (re-find #"/(\S+)\s+usecmap" text))
                    base (when (and parent (not= parent (str name)))
                           (encoding parent))
