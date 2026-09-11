@@ -76,8 +76,8 @@ JVM-only; a caller elsewhere reads the bytes itself and calls `parse`.
 ## Test
 
 ```sh
-clojure -M:test
-clojure -M:lint
+kbb -M:test
+kbb -M:lint
 ```
 
 13 tests / 44 assertions.
