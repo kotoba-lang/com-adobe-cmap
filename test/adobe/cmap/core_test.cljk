@@ -5,7 +5,7 @@
   every assertion below is a CID whose meaning can be confirmed from the
   published collection, so a parser that drifted would fail here rather than
   produce plausible Japanese."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [adobe.cmap.core :as cmap]))
 
 ;; ── the parser ───────────────────────────────────────────────────────────────
